@@ -1,0 +1,823 @@
+
+import 'dart:convert';
+import 'dart:math';
+import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
+
+void main() {
+  runApp(const QuizApp());
+}
+
+class QuizApp extends StatelessWidget {
+  const QuizApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      debugShowCheckedModeBanner: false,
+      title: 'Quiz Master',
+      theme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: Colors.deepPurple,
+        ),
+        useMaterial3: true,
+      ),
+      home: const HomePage(),
+    );
+  }
+}
+
+// ---------------- QUESTION MODEL ----------------
+
+class Question {
+  final String category;
+  final String question;
+  final List<String> options;
+  final String answer;
+
+  Question({
+    required this.category,
+    required this.question,
+    required this.options,
+    required this.answer,
+  });
+
+  Map<String, dynamic> toJson() => {
+    'category': category,
+    'question': question,
+    'options': options,
+    'answer': answer,
+  };
+
+  factory Question.fromJson(Map<String, dynamic> json) {
+    return Question(
+      category: json['category'],
+      question: json['question'],
+      options: List<String>.from(json['options']),
+      answer: json['answer'],
+    );
+  }
+}
+
+// ---------------- STORAGE ----------------
+
+class Storage {
+  static Future<List<Question>> getCustomQuestions() async {
+    final prefs = await SharedPreferences.getInstance();
+    final data = prefs.getString('custom_questions');
+
+    if (data == null) return [];
+
+    final List decoded = jsonDecode(data);
+    return decoded
+        .map((q) => Question.fromJson(q))
+        .toList();
+  }
+
+  static Future<void> saveCustomQuestion(Question q) async {
+    final prefs = await SharedPreferences.getInstance();
+    final questions = await getCustomQuestions();
+
+    questions.add(q);
+
+    await prefs.setString(
+      'custom_questions',
+      jsonEncode(questions.map((q) => q.toJson()).toList()),
+    );
+  }
+
+  static Future<int> getBestScore(String category) async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getInt('best_$category') ?? 0;
+  }
+
+  static Future<void> saveBestScore(
+    String category,
+    int score,
+  ) async {
+    final prefs = await SharedPreferences.getInstance();
+    final oldScore = prefs.getInt('best_$category') ?? 0;
+
+    if (score > oldScore) {
+      await prefs.setInt('best_$category', score);
+    }
+  }
+}
+
+// ---------------- QUIZ API ----------------
+
+class QuizService {
+  static Future<List<Question>> fetchQuestions(
+    int categoryId,
+    String categoryName,
+  ) async {
+    try {
+      final url = Uri.parse(
+        'https://opentdb.com/api.php?amount=10'
+        '&category=$categoryId&type=multiple',
+      );
+
+      final response = await http.get(url)
+          .timeout(const Duration(seconds: 15));
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        final results = data['results'] as List;
+
+        return results.map<Question>((item) {
+          final options = <String>[
+            item['correct_answer'],
+            ...List<String>.from(item['incorrect_answers']),
+          ];
+
+          options.shuffle();
+
+          return Question(
+            category: categoryName,
+            question: item['question'],
+            options: options,
+            answer: item['correct_answer'],
+          );
+        }).toList();
+      }
+    } catch (e) {
+      debugPrint('API error: $e');
+    }
+
+    // Fallback questions if internet is unavailable
+    return [
+      Question(
+        category: categoryName,
+        question: 'Which language is used with Flutter?',
+        options: ['Java', 'Dart', 'Python', 'C'],
+        answer: 'Dart',
+      ),
+      Question(
+        category: categoryName,
+        question: 'Which company developed Flutter?',
+        options: ['Google', 'Microsoft', 'Apple', 'Amazon'],
+        answer: 'Google',
+      ),
+      Question(
+        category: categoryName,
+        question: 'What does CPU stand for?',
+        options: [
+          'Central Processing Unit',
+          'Computer Personal Unit',
+          'Central Program Utility',
+          'Control Processing User'
+        ],
+        answer: 'Central Processing Unit',
+      ),
+    ];
+  }
+}
+
+// ---------------- HOME PAGE ----------------
+
+class HomePage extends StatelessWidget {
+  const HomePage({super.key});
+
+  final List<Map<String, dynamic>> categories = const [
+    {'name': 'General Knowledge', 'id': 9, 'icon': Icons.public},
+    {'name': 'Science', 'id': 17, 'icon': Icons.science},
+    {'name': 'History', 'id': 23, 'icon': Icons.history_edu},
+    {'name': 'Computers', 'id': 18, 'icon': Icons.computer},
+    {'name': 'Sports', 'id': 21, 'icon': Icons.sports},
+    {'name': 'My Questions', 'id': 0, 'icon': Icons.edit_note},
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text(
+          'Quiz Master',
+          style: TextStyle(fontWeight: FontWeight.bold),
+        ),
+        centerTitle: true,
+      ),
+      body: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Test Your Knowledge!',
+              style: TextStyle(
+                fontSize: 25,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 8),
+            const Text('Choose a category and start playing.'),
+            const SizedBox(height: 20),
+            Expanded(
+              child: GridView.builder(
+                itemCount: categories.length,
+                gridDelegate:
+                    const SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: 2,
+                  crossAxisSpacing: 12,
+                  mainAxisSpacing: 12,
+                  childAspectRatio: 1.15,
+                ),
+                itemBuilder: (context, index) {
+                  final category = categories[index];
+
+                  return FutureBuilder<int>(
+                    future: Storage.getBestScore(category['name']),
+                    builder: (context, snapshot) {
+                      return Card(
+                        elevation: 3,
+                        child: InkWell(
+                          borderRadius: BorderRadius.circular(12),
+                          onTap: () {
+                            Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                builder: (_) => QuizPage(
+                                  categoryName: category['name'],
+                                  categoryId: category['id'],
+                                ),
+                              ),
+                            );
+                          },
+                          child: Padding(
+                            padding: const EdgeInsets.all(12),
+                            child: Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Icon(
+                                  category['icon'],
+                                  size: 40,
+                                  color: Colors.deepPurple,
+                                ),
+                                const SizedBox(height: 10),
+                                Text(
+                                  category['name'],
+                                  textAlign: TextAlign.center,
+                                  style: const TextStyle(
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                                const SizedBox(height: 5),
+                                Text(
+                                  'Best: ${snapshot.data ?? 0}/10',
+                                  style: const TextStyle(
+                                    color: Colors.green,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      );
+                    },
+                  );
+                },
+              ),
+            ),
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                icon: const Icon(Icons.add),
+                label: const Text('Add Custom Question'),
+                onPressed: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => const AddQuestionPage(),
+                    ),
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ---------------- QUIZ PAGE ----------------
+
+class QuizPage extends StatefulWidget {
+  final String categoryName;
+  final int categoryId;
+
+  const QuizPage({
+    super.key,
+    required this.categoryName,
+    required this.categoryId,
+  });
+
+  @override
+  State<QuizPage> createState() => _QuizPageState();
+}
+
+class _QuizPageState extends State<QuizPage> {
+  List<Question> questions = [];
+  int currentIndex = 0;
+  int score = 0;
+  String? selectedAnswer;
+  bool loading = true;
+  bool answered = false;
+
+  @override
+  void initState() {
+    super.initState();
+    loadQuestions();
+  }
+
+  Future<void> loadQuestions() async {
+    List<Question> loaded = [];
+
+    if (widget.categoryId == 0) {
+      loaded = await Storage.getCustomQuestions();
+    } else {
+      loaded = await QuizService.fetchQuestions(
+        widget.categoryId,
+        widget.categoryName,
+      );
+
+      final custom = await Storage.getCustomQuestions();
+
+      loaded.addAll(
+        custom.where((q) => q.category == widget.categoryName),
+      );
+    }
+
+    loaded.shuffle();
+
+    if (mounted) {
+      setState(() {
+        questions = loaded;
+        loading = false;
+      });
+    }
+  }
+
+  void selectAnswer(String answer) {
+    if (answered) return;
+
+    setState(() {
+      selectedAnswer = answer;
+      answered = true;
+
+      if (answer == questions[currentIndex].answer) {
+        score++;
+      }
+    });
+  }
+
+  Future<void> nextQuestion() async {
+    if (currentIndex < questions.length - 1) {
+      setState(() {
+        currentIndex++;
+        selectedAnswer = null;
+        answered = false;
+      });
+    } else {
+      await Storage.saveBestScore(widget.categoryName, score);
+
+      if (!mounted) return;
+
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(
+          builder: (_) => ResultPage(
+            score: score,
+            total: questions.length,
+            category: widget.categoryName,
+          ),
+        ),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (loading) {
+      return const Scaffold(
+        body: Center(child: CircularProgressIndicator()),
+      );
+    }
+
+    if (questions.isEmpty) {
+      return Scaffold(
+        appBar: AppBar(title: const Text('Quiz')),
+        body: Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Text('No custom questions available!'),
+              const SizedBox(height: 12),
+              ElevatedButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Go Back'),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    final question = questions[currentIndex];
+
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(widget.categoryName),
+        centerTitle: true,
+      ),
+      body: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              'Question ${currentIndex + 1} / ${questions.length}',
+              style: const TextStyle(
+                fontSize: 17,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 12),
+            LinearProgressIndicator(
+              value: (currentIndex + 1) / questions.length,
+            ),
+            const SizedBox(height: 30),
+            Text(
+              question.question,
+              style: const TextStyle(
+                fontSize: 21,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 25),
+            ...question.options.map((option) {
+              Color color = Colors.deepPurple.shade50;
+
+              if (answered && option == question.answer) {
+                color = Colors.green.shade200;
+              } else if (answered && option == selectedAnswer) {
+                color = Colors.red.shade200;
+              }
+
+              return Card(
+                color: color,
+                child: ListTile(
+                  title: Text(option),
+                  trailing: answered && option == question.answer
+                      ? const Icon(Icons.check_circle, color: Colors.green)
+                      : answered && option == selectedAnswer
+                          ? const Icon(Icons.cancel, color: Colors.red)
+                          : null,
+                  onTap: () => selectAnswer(option),
+                ),
+              );
+            }),
+            const Spacer(),
+            Text(
+              'Current Score: $score',
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 15),
+            ElevatedButton(
+              onPressed: answered ? nextQuestion : null,
+              child: Text(
+                currentIndex == questions.length - 1
+                    ? 'Finish Quiz'
+                    : 'Next Question',
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ---------------- RESULTS PAGE ----------------
+
+class ResultPage extends StatelessWidget {
+  final int score;
+  final int total;
+  final String category;
+
+  const ResultPage({
+    super.key,
+    required this.score,
+    required this.total,
+    required this.category,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final percentage =
+        total == 0 ? 0 : (score / total * 100).round();
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Quiz Results'),
+        centerTitle: true,
+        automaticallyImplyLeading: false,
+      ),
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(25),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(
+                Icons.emoji_events,
+                color: Colors.amber,
+                size: 90,
+              ),
+              const SizedBox(height: 20),
+              const Text(
+                'Quiz Completed!',
+                style: TextStyle(
+                  fontSize: 27,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 25),
+              Text(
+                '$score / $total',
+                style: const TextStyle(
+                  fontSize: 45,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.deepPurple,
+                ),
+              ),
+              Text(
+                '$percentage% Score',
+                style: const TextStyle(fontSize: 20),
+              ),
+              const SizedBox(height: 15),
+              Text(
+                percentage >= 80
+                    ? 'Excellent Performance!'
+                    : percentage >= 50
+                        ? 'Good Job! Keep Practicing.'
+                        : 'Keep Learning and Try Again!',
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 35),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: () {
+                    Navigator.pushReplacement(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => QuizPage(
+                          categoryName: category,
+                          categoryId: category == 'My Questions'
+                              ? 0
+                              : _getCategoryId(category),
+                        ),
+                      ),
+                    );
+                  },
+                  child: const Text('Play Again'),
+                ),
+              ),
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton(
+                  onPressed: () {
+                    Navigator.popUntil(
+                      context,
+                      (route) => route.isFirst,
+                    );
+                  },
+                  child: const Text('Back to Home'),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  int _getCategoryId(String name) {
+    const ids = {
+      'General Knowledge': 9,
+      'Science': 17,
+      'History': 23,
+      'Computers': 18,
+      'Sports': 21,
+    };
+
+    return ids[name] ?? 9;
+  }
+}
+
+// ---------------- ADD CUSTOM QUESTION ----------------
+
+class AddQuestionPage extends StatefulWidget {
+  const AddQuestionPage({super.key});
+
+  @override
+  State<AddQuestionPage> createState() => _AddQuestionPageState();
+}
+
+class _AddQuestionPageState extends State<AddQuestionPage> {
+  final questionController = TextEditingController();
+  final option1 = TextEditingController();
+  final option2 = TextEditingController();
+  final option3 = TextEditingController();
+  final option4 = TextEditingController();
+
+  String category = 'General Knowledge';
+  String? correctAnswer;
+
+  final categories = [
+    'General Knowledge',
+    'Science',
+    'History',
+    'Computers',
+    'Sports',
+  ];
+
+  @override
+  void dispose() {
+    questionController.dispose();
+    option1.dispose();
+    option2.dispose();
+    option3.dispose();
+    option4.dispose();
+    super.dispose();
+  }
+
+  Future<void> saveQuestion() async {
+    final options = [
+      option1.text.trim(),
+      option2.text.trim(),
+      option3.text.trim(),
+      option4.text.trim(),
+    ];
+
+    if (questionController.text.trim().isEmpty ||
+        options.any((o) => o.isEmpty) ||
+        options.toSet().length != 4 ||
+        correctAnswer == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Fill all fields and select the correct answer. '
+            'Options must be different.',
+          ),
+        ),
+      );
+      return;
+    }
+
+    final question = Question(
+      category: category,
+      question: questionController.text.trim(),
+      options: options,
+      answer: correctAnswer!,
+    );
+
+    await Storage.saveCustomQuestion(question);
+
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Question saved successfully!'),
+      ),
+    );
+
+    Navigator.pop(context);
+  }
+
+  Widget optionField(
+    String label,
+    TextEditingController controller,
+  ) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: TextField(
+        controller: controller,
+        decoration: InputDecoration(
+          labelText: label,
+          border: const OutlineInputBorder(),
+        ),
+        onChanged: (_) {
+          if (correctAnswer != null) {
+            setState(() {
+              correctAnswer = null;
+            });
+          }
+        },
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final optionControllers = [
+      option1,
+      option2,
+      option3,
+      option4,
+    ];
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Add Custom Question'),
+      ),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            DropdownButtonFormField<String>(
+              value: category,
+              decoration: const InputDecoration(
+                labelText: 'Select Category',
+                border: OutlineInputBorder(),
+              ),
+              items: categories.map((c) {
+                return DropdownMenuItem(
+                  value: c,
+                  child: Text(c),
+                );
+              }).toList(),
+              onChanged: (value) {
+                if (value != null) {
+                  setState(() => category = value);
+                }
+              },
+            ),
+            const SizedBox(height: 20),
+            TextField(
+              controller: questionController,
+              maxLines: 3,
+              decoration: const InputDecoration(
+                labelText: 'Enter Question',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 20),
+            const Text(
+              'Enter Four Options',
+              style: TextStyle(
+                fontWeight: FontWeight.bold,
+                fontSize: 18,
+              ),
+            ),
+            const SizedBox(height: 12),
+            for (int i = 0; i < 4; i++)
+              optionField(
+                'Option ${i + 1}',
+                optionControllers[i],
+              ),
+            const SizedBox(height: 10),
+            const Text(
+              'Select Correct Answer',
+              style: TextStyle(
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 8),
+            ...optionControllers.map((controller) {
+              return RadioListTile<String>(
+                title: Text(
+                  controller.text.isEmpty
+                      ? 'Option ${optionControllers.indexOf(controller) + 1}'
+                      : controller.text,
+                ),
+                value: controller.text.trim(),
+                groupValue: correctAnswer,
+                onChanged: controller.text.trim().isEmpty
+                    ? null
+                    : (value) {
+                        setState(() {
+                          correctAnswer = value;
+                        });
+                      },
+              );
+            }),
+            const SizedBox(height: 20),
+            ElevatedButton.icon(
+              onPressed: saveQuestion,
+              icon: const Icon(Icons.save),
+              label: const Text('Save Question'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
